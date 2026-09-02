@@ -1,0 +1,45 @@
+name: Upgrade Android CLI to Tailscale v1.102.3
+
+on:
+  push:
+    branches:
+      - 1.98.8-android-dev
+    paths:
+      - .github/workflows/upgrade_tailscale_1_102_3.yml
+
+permissions:
+  contents: write
+
+jobs:
+  upgrade:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout full history
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Port Android patch to v1.102.3
+        run: ./scripts/android.sh update v1.102.3
+
+      - name: Point Android self-update to this fork
+        run: |
+          sed -i 's#https://api.github.com/repos/anasfanani/tailscale-magisk-build/releases#https://api.github.com/repos/gbthui/tailscale-android-cli/releases#' clientupdate/clientupdate_android.go
+          git add clientupdate/clientupdate_android.go
+          git commit -m "fix: use gbthui Android CLI releases for self-update"
+
+      - name: Verify Android arm64 build
+        run: ./scripts/android.sh check arm64
+
+      - name: Push upgraded development branch
+        run: git push origin HEAD:1.102.3-android-dev
+
+      - name: Publish Android release tag
+        run: |
+          git tag -f v1.102.3-android
+          git push origin refs/tags/v1.102.3-android --force
