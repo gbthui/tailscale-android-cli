@@ -25,13 +25,51 @@ jobs:
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
 
       - name: Port Android patch to v1.102.3
-        run: ./scripts/android.sh update v1.102.3
+        shell: bash
+        run: |
+          set +e
+          ./scripts/android.sh update v1.102.3
+          rc=$?
+          set -e
+          if git diff --name-only --diff-filter=U | grep -q .; then
+            echo "Resolving known v1.102.3 conflicts against upstream code..."
+
+            git checkout --ours cmd/tailscaled/tailscaled.go
+            python3 - <<'PY'
+          from pathlib import Path
+          p = Path('cmd/tailscaled/tailscaled.go')
+          s = p.read_text()
+          helper = '''// createTailscaleSymlink creates a tailscale symlink pointing to the current\n// tailscaled binary on Android, enabling the combined binary to work with both names.\nfunc createTailscaleSymlink() {\n\texecPath, err := os.Executable()\n\tif err != nil {\n\t\treturn\n\t}\n\trealPath, err := filepath.EvalSymlinks(execPath)\n\tif err != nil {\n\t\trealPath = execPath\n\t}\n\tbinName := filepath.Base(realPath)\n\tbinDir := filepath.Dir(realPath)\n\tsymlinkPath := filepath.Join(binDir, "tailscale")\n\tif _, err := os.Lstat(symlinkPath); err == nil {\n\t\tif target, err := os.Readlink(symlinkPath); err == nil && target == binName {\n\t\t\treturn\n\t\t}\n\t\t_ = os.Remove(symlinkPath)\n\t}\n\t_ = os.Symlink(binName, symlinkPath)\n}\n\n'''
+          marker = '// defaultTunName returns the default tun device name for the platform.\n'
+          if 'func createTailscaleSymlink()' not in s:
+              s = s.replace(marker, helper + marker, 1)
+          s = s.replace('switch runtime.GOOS {\n\tcase "openbsd":', 'switch runtime.GOOS {\n\tcase "android":\n\t\treturn "tailscale0,userspace-networking"\n\tcase "openbsd":', 1)
+          s = s.replace('\tenvknob.PanicIfAnyEnvCheckedInInit()\n\tif shouldRunCLI()', '\tenvknob.PanicIfAnyEnvCheckedInInit()\n\tif runtime.GOOS == "android" {\n\t\tcreateTailscaleSymlink()\n\t}\n\tif shouldRunCLI()', 1)
+          s = s.replace('flag.BoolVar(&args.disableLogs, "no-logs-no-support", false,', 'flag.BoolVar(&args.disableLogs, "no-logs-no-support", true,', 1)
+          p.write_text(s)
+          PY
+
+            git checkout --ours ssh/tailssh/incubator.go
+            sed -i 's#//go:build (linux && !android) || (darwin && !ios) || freebsd || openbsd#//go:build (linux \&\& !android) || android || (darwin \&\& !ios) || freebsd || openbsd#' ssh/tailssh/incubator.go
+
+            git checkout --ours util/linuxfw/linuxfw.go
+
+            git checkout --ours wgengine/router/osrouter/router_linux.go
+            sed -i 's#//go:build !android#//go:build linux#' wgengine/router/osrouter/router_linux.go
+
+            git add cmd/tailscaled/tailscaled.go ssh/tailssh/incubator.go util/linuxfw/linuxfw.go wgengine/router/osrouter/router_linux.go
+            GIT_EDITOR=true git cherry-pick --continue
+          elif [ "$rc" -ne 0 ]; then
+            exit "$rc"
+          fi
 
       - name: Point Android self-update to this fork
         run: |
           sed -i 's#https://api.github.com/repos/anasfanani/tailscale-magisk-build/releases#https://api.github.com/repos/gbthui/tailscale-android-cli/releases#' clientupdate/clientupdate_android.go
           git add clientupdate/clientupdate_android.go
-          git commit -m "fix: use gbthui Android CLI releases for self-update"
+          if ! git diff --staged --quiet; then
+            git commit -m "fix: use gbthui Android CLI releases for self-update"
+          fi
 
       - name: Verify Android arm64 build
         run: ./scripts/android.sh check arm64
