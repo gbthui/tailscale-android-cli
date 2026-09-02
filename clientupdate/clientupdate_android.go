@@ -18,7 +18,7 @@ import (
 	"tailscale.com/util/cmpver"
 )
 
-const androidGitHubRepoURL = "https://api.github.com/repos/anasfanani/tailscale-magisk-build/releases"
+const androidGitHubRepoURL = "https://api.github.com/repos/gbthui/tailscale-android-cli/releases"
 
 // updateAndroid handles Tailscale updates on Android (Magisk/system installation).
 // Downloads release from GitHub and extracts binaries to the configured directory.
