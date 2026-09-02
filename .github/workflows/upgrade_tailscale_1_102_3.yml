@@ -74,10 +74,32 @@ jobs:
       - name: Verify Android arm64 build
         run: ./scripts/android.sh check arm64
 
+      - name: Build Android binaries
+        run: |
+          ./scripts/android.sh build --upx arm
+          ./scripts/android.sh build --upx arm64
+          eval "$(./build_dist.sh shellvars)"
+          tar -czf "dist/tailscale_${VERSION_SHORT}_arm.tgz" -C dist --transform='s/tailscaled.arm/tailscaled/' tailscaled.arm
+          tar -czf "dist/tailscale_${VERSION_SHORT}_arm64.tgz" -C dist --transform='s/tailscaled.arm64/tailscaled/' tailscaled.arm64
+          ls -lh dist
+
+      - name: Strip workflow files from source branch
+        run: |
+          git rm -r .github/workflows
+          git commit -m "chore: omit workflow files from Android source branch"
+
       - name: Push upgraded development branch
         run: git push origin HEAD:1.102.3-android-dev
 
-      - name: Publish Android release tag
+      - name: Create Android CLI release
+        env:
+          GH_TOKEN: ${{ github.token }}
         run: |
-          git tag -f v1.102.3-android
-          git push origin refs/tags/v1.102.3-android --force
+          gh release delete v1.102.3-android --yes --cleanup-tag 2>/dev/null || true
+          gh release create v1.102.3-android \
+            dist/tailscale_1.102.3_arm.tgz \
+            dist/tailscale_1.102.3_arm64.tgz \
+            --repo gbthui/tailscale-android-cli \
+            --target 1.102.3-android-dev \
+            --title "Tailscale Android CLI 1.102.3" \
+            --notes "Tailscale v1.102.3 with Android CLI/Magisk adaptations from this fork."
