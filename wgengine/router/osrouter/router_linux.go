@@ -15,6 +15,7 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"runtime"
 	"path/filepath"
 	"slices"
 	"strconv"
@@ -1649,7 +1650,14 @@ var ubntIPRules = []netlink.Rule{
 // ipRules returns the appropriate list of ip rules to be used by Tailscale. See
 // comments on baseIPRules and ubntIPRules for more details.
 func ipRules() []netlink.Rule {
-	if getDistroFunc() == distro.UBNT {
+	// Root Android relies on netd policy routing rather than a conventional
+	// default route in Linux's main table. Using baseIPRules would send
+	// tailscaled's bypass-marked sockets through main/default and then the
+	// explicit unreachable rule before Android's netd rules can select the
+	// active physical network. The inverted-fwmark rule keeps ordinary
+	// traffic in table 52 while allowing bypass-marked daemon traffic to
+	// fall through to Android's native policy routing.
+	if runtime.GOOS == "android" || getDistroFunc() == distro.UBNT {
 		return ubntIPRules
 	}
 	return baseIPRules
