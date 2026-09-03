@@ -1,0 +1,89 @@
+name: Fix Android policy routing on Tailscale v1.102.3
+
+on:
+  push:
+    branches:
+      - 1.98.8-android-dev
+    paths:
+      - .github/workflows/fix_1_102_3_android_policy_routing.yml
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout Android branch
+        uses: actions/checkout@v4
+        with:
+          ref: 1.102.3-android-dev
+          fetch-depth: 0
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+      - name: Restore upstream Happy Eyeballs and fix Android policy routing
+        run: |
+          curl -fsSL https://raw.githubusercontent.com/tailscale/tailscale/v1.102.3/net/netx/racedial.go -o net/netx/racedial.go
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('wgengine/router/osrouter/router_linux.go')
+          s = p.read_text()
+          if '"runtime"' not in s:
+              s = s.replace('\t"os/exec"\n', '\t"os/exec"\n\t"runtime"\n', 1)
+          old = '''func ipRules() []netlink.Rule {
+          \tif getDistroFunc() == distro.UBNT {
+          \t\treturn ubntIPRules
+          \t}
+          \treturn baseIPRules
+          }'''
+          new = '''func ipRules() []netlink.Rule {
+          \t// Root Android relies on netd policy routing rather than a conventional
+          \t// default route in Linux's main table. Using baseIPRules would send
+          \t// tailscaled's bypass-marked sockets through main/default and then the
+          \t// explicit unreachable rule before Android's netd rules can select the
+          \t// active physical network. The inverted-fwmark rule keeps ordinary
+          \t// traffic in table 52 while allowing bypass-marked daemon traffic to
+          \t// fall through to Android's native policy routing.
+          \tif runtime.GOOS == "android" || getDistroFunc() == distro.UBNT {
+          \t\treturn ubntIPRules
+          \t}
+          \treturn baseIPRules
+          }'''
+          if old not in s:
+              raise SystemExit('ipRules block not found')
+          p.write_text(s.replace(old, new, 1))
+          PY
+          git add net/netx/racedial.go wgengine/router/osrouter/router_linux.go
+          git commit -m "fix(android): let bypass-marked sockets use Android netd routing"
+
+      - name: Verify Android arm64 build
+        run: ./scripts/android.sh check arm64
+
+      - name: Build arm and arm64
+        run: |
+          ./scripts/android.sh build --upx arm
+          ./scripts/android.sh build --upx arm64
+          eval "$(./build_dist.sh shellvars)"
+          tar -czf "dist/tailscale_${VERSION_SHORT}_arm.tgz" -C dist --transform='s/tailscaled.arm/tailscaled/' tailscaled.arm
+          tar -czf "dist/tailscale_${VERSION_SHORT}_arm64.tgz" -C dist --transform='s/tailscaled.arm64/tailscaled/' tailscaled.arm64
+          ls -lh dist
+
+      - name: Push fixed Android branch
+        run: git push origin HEAD:1.102.3-android-dev
+
+      - name: Recreate Android CLI release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete v1.102.3-android --yes --cleanup-tag --repo gbthui/tailscale-android-cli 2>/dev/null || true
+          gh release create v1.102.3-android \
+            dist/tailscale_1.102.3_arm.tgz \
+            dist/tailscale_1.102.3_arm64.tgz \
+            --repo gbthui/tailscale-android-cli \
+            --target 1.102.3-android-dev \
+            --title "Tailscale Android CLI 1.102.3" \
+            --notes "Tailscale v1.102.3 with root-Android adaptations. Bypass-marked tailscaled sockets now fall through to Android netd policy routing instead of hitting Linux main/default/unreachable rules. Upstream Happy Eyeballs behavior is preserved."
