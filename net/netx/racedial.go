@@ -7,6 +7,7 @@ import (
 	"context"
 	"net"
 	"net/netip"
+	"runtime"
 	"time"
 
 	"tailscale.com/util/slicesx"
@@ -18,9 +19,12 @@ import (
 // cancelled and their connections closed. If all dials fail, the first
 // error is returned.
 //
-// Addresses are interleaved v6-first so that IPv6 is preferred but both
-// families are tried promptly. The dial func is always called with
-// network "tcp".
+// Upstream prefers IPv6 first. The standalone/root Android build does not
+// have Android's VpnService network-binding hooks and instead uses Linux
+// routing/marking semantics, so an unusable host IPv6 route can otherwise be
+// selected first during control-plane bootstrap. Prefer IPv4 first on Android
+// while retaining IPv6 as the immediate fallback. Other platforms preserve
+// upstream's IPv6-first ordering.
 func RaceDial(ctx context.Context, addrs []netip.AddrPort, dial DialFunc, fallbackDelay time.Duration) (net.Conn, error) {
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
@@ -33,7 +37,12 @@ func RaceDial(ctx context.Context, addrs []netip.AddrPort, dial DialFunc, fallba
 			v4 = append(v4, a)
 		}
 	}
-	ordered := slicesx.Interleave(v6, v4)
+	var ordered []netip.AddrPort
+	if runtime.GOOS == "android" {
+		ordered = slicesx.Interleave(v4, v6)
+	} else {
+		ordered = slicesx.Interleave(v6, v4)
+	}
 
 	type result struct {
 		c   net.Conn
