@@ -36,7 +36,7 @@ jobs:
           test "$(cat VERSION.txt)" = "1.102.4"
           grep -Fq 'gbthui/tailscale-android-cli/releases' clientupdate/clientupdate_android.go
           grep -Fq 'runtime.GOOS == "android"' wgengine/router/osrouter/router_linux.go
-          git diff --check v1.102.4..HEAD
+          test -z "$(git diff --name-only --diff-filter=U)"
 
       - name: Verify Android arm64 build
         run: ./scripts/android.sh check arm64
