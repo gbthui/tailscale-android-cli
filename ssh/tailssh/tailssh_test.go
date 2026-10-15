@@ -6,6 +6,7 @@
 package tailssh
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"crypto/ecdsa"
@@ -20,7 +21,6 @@ import (
 	"net/http/httptest"
 	"net/netip"
 	"os"
-	"os/exec"
 	"os/user"
 	"reflect"
 	"runtime"
@@ -33,31 +33,26 @@ import (
 	"testing/synctest"
 	"time"
 
-	gliderssh "github.com/tailscale/gliderssh"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 	"tailscale.com/cmd/testwrapper/flakytest"
-	"tailscale.com/ipn/ipnlocal"
-	"tailscale.com/ipn/store/mem"
 	"tailscale.com/net/memnet"
-	"tailscale.com/net/tsdial"
 	"tailscale.com/sessionrecording"
 	"tailscale.com/tailcfg"
 	testssh "tailscale.com/tempfork/sshtest/ssh"
-	"tailscale.com/tsd"
 	"tailscale.com/tstest"
-	"tailscale.com/types/key"
-	"tailscale.com/types/logid"
-	"tailscale.com/types/netmap"
 	"tailscale.com/util/cibuild"
 	"tailscale.com/util/lineiter"
 	"tailscale.com/util/must"
 	"tailscale.com/version/distro"
-	"tailscale.com/wgengine"
 )
 
 func TestMatchRule(t *testing.T) {
 	someAction := new(tailcfg.SSHAction)
+	// nonRootUser is a real non-root user in the local passwd database,
+	// used by the "ssh-user-equal" case because mapLocalUser now does a
+	// userLookup (via getent) when the mapped value is "=" and rejects root.
+	nonRootUser := aNonRootUser(t)
 	tests := []struct {
 		name          string
 		rule          *tailcfg.SSHRule
@@ -219,8 +214,8 @@ func TestMatchRule(t *testing.T) {
 					"*": "=",
 				},
 			},
-			ci:       &sshConnInfo{sshUser: "alice"},
-			wantUser: "alice",
+			ci:       &sshConnInfo{sshUser: nonRootUser},
+			wantUser: nonRootUser,
 		},
 	}
 	for _, tt := range tests {
@@ -375,18 +370,6 @@ func TestEvalSSHPolicy(t *testing.T) {
 	}
 }
 
-// localState implements ipnLocalBackend for testing.
-type localState struct {
-	sshEnabled   bool
-	matchingRule *tailcfg.SSHRule
-	varRoot      string // if empty, TailscaleVarRoot returns ""
-
-	// serverActions is a map of the action name to the action.
-	// It is served for paths like https://unused/ssh-action/<action-name>.
-	// The action name is the last part of the action URL.
-	serverActions map[string]*tailcfg.SSHAction
-}
-
 var currentUser = func() string {
 	// Prefer user.Current because the USER env var is not set in
 	// some environments (e.g. the golang:latest container used by CI).
@@ -396,78 +379,44 @@ var currentUser = func() string {
 	return os.Getenv("USER")
 }()
 
-func (ts *localState) Dialer() *tsdial.Dialer {
-	return &tsdial.Dialer{}
-}
-
-func (ts *localState) ShouldRunSSH() bool {
-	return ts.sshEnabled
-}
-
-func (ts *localState) NetMap() *netmap.NetworkMap {
-	var policy *tailcfg.SSHPolicy
-	if ts.matchingRule != nil {
-		policy = &tailcfg.SSHPolicy{
-			Rules: []*tailcfg.SSHRule{
-				ts.matchingRule,
-			},
+// aNonRootUser returns the username of a non-root user that exists in the
+// local passwd database (verified via userLookup, which uses getent on
+// Linux). It prefers the current user, falling back to reading /etc/passwd
+// for a real non-root account when the tests are run as root (e.g. in CI).
+// It skips the test if no such user can be found.
+func aNonRootUser(t *testing.T) string {
+	t.Helper()
+	if u, err := userLookup(currentUser); err == nil && u.Uid != "0" && u.Username != "root" {
+		return currentUser
+	}
+	f, err := os.Open("/etc/passwd")
+	if err != nil {
+		t.Skipf("can't find a non-root user: %v", err)
+	}
+	defer f.Close()
+	scan := bufio.NewScanner(f)
+	for scan.Scan() {
+		fields := strings.Split(scan.Text(), ":")
+		if len(fields) < 3 {
+			continue
+		}
+		name, uid := fields[0], fields[2]
+		if uid == "0" || name == "root" {
+			continue
+		}
+		if _, err := userLookup(name); err == nil {
+			return name
 		}
 	}
-
-	return &netmap.NetworkMap{
-		SelfNode: (&tailcfg.Node{
-			ID: 1,
-		}).View(),
-		SSHPolicy: policy,
-	}
-}
-
-func (ts *localState) NetMapNoPeers() *netmap.NetworkMap { return ts.NetMap() }
-
-func (ts *localState) WhoIs(proto string, ipp netip.AddrPort) (n tailcfg.NodeView, u tailcfg.UserProfile, ok bool) {
-	if proto != "tcp" {
-		return tailcfg.NodeView{}, tailcfg.UserProfile{}, false
-	}
-
-	return (&tailcfg.Node{
-			ID:       2,
-			StableID: "peer-id",
-		}).View(), tailcfg.UserProfile{
-			LoginName: "peer",
-		}, true
-
-}
-
-func (ts *localState) DoNoiseRequest(req *http.Request) (*http.Response, error) {
-	rec := httptest.NewRecorder()
-	k, ok := strings.CutPrefix(req.URL.Path, "/ssh-action/")
-	if !ok {
-		rec.WriteHeader(http.StatusNotFound)
-	}
-	a, ok := ts.serverActions[k]
-	if !ok {
-		rec.WriteHeader(http.StatusNotFound)
-		return rec.Result(), nil
-	}
-	rec.WriteHeader(http.StatusOK)
-	if err := json.NewEncoder(rec).Encode(a); err != nil {
-		return nil, err
-	}
-	return rec.Result(), nil
-}
-
-func (ts *localState) TailscaleVarRoot() string {
-	return ts.varRoot
-}
-
-func (ts *localState) NodeKey() key.NodePublic {
-	return key.NewNode().Public()
+	t.Skip("can't find a non-root user in /etc/passwd")
+	return ""
 }
 
 func newSSHRule(action *tailcfg.SSHAction) *tailcfg.SSHRule {
 	return &tailcfg.SSHRule{
 		SSHUsers: map[string]string{
 			"alice": currentUser,
+			"*":     "=",
 		},
 		Action: action,
 		Principals: []*tailcfg.SSHPrincipal{
@@ -523,6 +472,7 @@ func TestSSHRecordingCancelsSessionsOnUploadFailure(t *testing.T) {
 		handler          func(w http.ResponseWriter, r *http.Request)
 		sshCommand       string
 		wantClientOutput string
+		wantExitCode     int // SSH exit status; 0 = don't check. 254 = recording infra failure.
 
 		clientOutputMustNotContain []string
 	}{
@@ -533,6 +483,7 @@ func TestSSHRecordingCancelsSessionsOnUploadFailure(t *testing.T) {
 			},
 			sshCommand:       "echo hello",
 			wantClientOutput: "session rejected\r\n",
+			wantExitCode:     254,
 
 			clientOutputMustNotContain: []string{"hello"},
 		},
@@ -579,6 +530,16 @@ func TestSSHRecordingCancelsSessionsOnUploadFailure(t *testing.T) {
 					t.Logf("client got: %q: %v", got, err)
 				} else {
 					t.Errorf("client did not get kicked out: %q", got)
+				}
+				if tt.wantExitCode != 0 {
+					var exitErr *testssh.ExitError
+					if errors.As(err, &exitErr) {
+						if got := exitErr.ExitStatus(); got != tt.wantExitCode {
+							t.Errorf("exit code = %d, want %d", got, tt.wantExitCode)
+						}
+					} else {
+						t.Errorf("want *ssh.ExitError, got %T: %v", err, err)
+					}
 				}
 				gotStr := string(got)
 				if !strings.HasSuffix(gotStr, tt.wantClientOutput) {
@@ -758,7 +719,7 @@ func TestSSHRecordingNonInteractive(t *testing.T) {
 		}
 		defer session.Close()
 		t.Logf("client established session")
-		_, err = session.CombinedOutput("echo Ran echo!")
+		_, err = session.CombinedOutput("sh -c 'echo Ran echo!; echo to-stderr >&2'")
 		if err != nil {
 			t.Errorf("client: %v", err)
 		}
@@ -773,16 +734,54 @@ func TestSSHRecordingNonInteractive(t *testing.T) {
 	case <-time.After(30 * time.Second):
 		t.Fatal("timed out waiting for recording")
 	}
-	var ch sessionrecording.CastHeader
-	if err := json.NewDecoder(bytes.NewReader(recording)).Decode(&ch); err != nil {
-		t.Fatal(err)
-	}
+	ch, recordedOutput := parseRecording(t, recording)
 	if ch.SSHUser != sshUser {
 		t.Errorf("SSHUser = %q; want %q", ch.SSHUser, sshUser)
 	}
-	if ch.Command != "echo Ran echo!" {
-		t.Errorf("Command = %q; want %q", ch.Command, "echo Ran echo!")
+	const wantCommand = "sh -c echo Ran echo!; echo to-stderr >&2"
+	if ch.Command != wantCommand {
+		t.Errorf("Command = %q; want %q", ch.Command, wantCommand)
 	}
+	// Both stdout and stderr must be captured in the recording. On non-PTY
+	// sessions stderr is a separate stream; it must still flow through the
+	// recording writer (recorded under the "o" output direction).
+	if !strings.Contains(recordedOutput, "Ran echo!") {
+		t.Errorf("recording missing stdout output %q; got %q", "Ran echo!", recordedOutput)
+	}
+	if !strings.Contains(recordedOutput, "to-stderr") {
+		t.Errorf("recording missing stderr output %q; got %q", "to-stderr", recordedOutput)
+	}
+}
+
+// parseRecording parses a session recording, returning its CastHeader and the
+// concatenation of all recorded output.
+//
+// The recording is a stream of newline-separated JSON: the CastHeader,
+// followed by asciinema cast lines of the form [time, "o", data].
+func parseRecording(t *testing.T, recording []byte) (sessionrecording.CastHeader, string) {
+	t.Helper()
+	dec := json.NewDecoder(bytes.NewReader(recording))
+	var ch sessionrecording.CastHeader
+	if err := dec.Decode(&ch); err != nil {
+		t.Fatalf("decoding cast header: %v", err)
+	}
+	var output strings.Builder
+	for dec.More() {
+		var line []any
+		if err := dec.Decode(&line); err != nil {
+			t.Fatalf("decoding cast line: %v", err)
+		}
+		if len(line) != 3 {
+			continue
+		}
+		if dir, _ := line[1].(string); dir != "o" {
+			continue
+		}
+		if data, ok := line[2].(string); ok {
+			output.WriteString(data)
+		}
+	}
+	return ch, output.String()
 }
 
 func TestSSHAuthFlow(t *testing.T) {
@@ -803,6 +802,11 @@ func TestSSHAuthFlow(t *testing.T) {
 		Reject:  true,
 		Message: "Go Away!",
 	})
+	autogroupNonrootRule := newSSHRule(&tailcfg.SSHAction{
+		Accept:  true,
+		Message: "autogroup:nonroot",
+	})
+	autogroupNonrootRule.SSHUsers = map[string]string{"*": "="}
 
 	tests := []struct {
 		name         string
@@ -830,6 +834,72 @@ func TestSSHAuthFlow(t *testing.T) {
 			},
 			authErr:     true,
 			wantBanners: []string{`tailscale: tailnet policy does not permit you to SSH as user "alice"` + "\n"},
+		},
+		{
+			name:    "user-mismatch-numeric-username",
+			sshUser: "321",
+			state: &localState{
+				sshEnabled:   true,
+				varRoot:      varRoot,
+				matchingRule: bobRule,
+			},
+			authErr:     true,
+			wantBanners: []string{`tailscale: tailnet policy does not permit you to SSH as user "321"` + "\n"},
+		},
+		{
+			name:    "user-mismatch-root-uid",
+			sshUser: "0",
+			state: &localState{
+				sshEnabled:   true,
+				varRoot:      varRoot,
+				matchingRule: autogroupNonrootRule,
+			},
+			authErr:     true,
+			wantBanners: []string{`tailscale: tailnet policy does not permit you to SSH as user "0"` + "\n"},
+		},
+		{
+			name:    "user-mismatch-root-uid-leading-space",
+			sshUser: " 0",
+			state: &localState{
+				sshEnabled:   true,
+				varRoot:      varRoot,
+				matchingRule: autogroupNonrootRule,
+			},
+			authErr:     true,
+			wantBanners: []string{`tailscale: tailnet policy does not permit you to SSH as user " 0"` + "\n"},
+		},
+		{
+			name:    "user-mismatch-root-uid-force-password-auth",
+			sshUser: "0+password",
+			state: &localState{
+				sshEnabled:   true,
+				varRoot:      varRoot,
+				matchingRule: autogroupNonrootRule,
+			},
+			authErr:     true,
+			wantBanners: []string{`tailscale: tailnet policy does not permit you to SSH as user "0"` + "\n"},
+		},
+		{
+			name:    "user-mismatch-double-zero-force-password-auth",
+			sshUser: "00+password",
+			state: &localState{
+				sshEnabled:   true,
+				varRoot:      varRoot,
+				matchingRule: autogroupNonrootRule,
+			},
+			authErr:     true,
+			wantBanners: []string{`tailscale: tailnet policy does not permit you to SSH as user "00"` + "\n"},
+		},
+		{
+			name:    "user-mismatch-leading-plus",
+			sshUser: "+0",
+			state: &localState{
+				sshEnabled:   true,
+				varRoot:      varRoot,
+				matchingRule: autogroupNonrootRule,
+			},
+			authErr:     true,
+			wantBanners: []string{`tailscale: tailnet policy does not permit you to SSH as user "+0"` + "\n"},
 		},
 		{
 			name: "accept",
@@ -1061,88 +1131,8 @@ func TestSSHAuthFlow(t *testing.T) {
 }
 
 func TestSSH(t *testing.T) {
-	logf := tstest.WhileTestRunningLogger(t)
-	sys := tsd.NewSystem()
-	eng, err := wgengine.NewFakeUserspaceEngine(logf, sys.Set, sys.HealthTracker.Get(), sys.UserMetricsRegistry(), sys.Bus.Get())
-	if err != nil {
-		t.Fatal(err)
-	}
-	sys.Set(eng)
-	sys.Set(new(mem.Store))
-	lb, err := ipnlocal.NewLocalBackend(logf, logid.PublicID{}, sys, 0)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer lb.Shutdown()
-	dir := t.TempDir()
-	lb.SetVarRoot(dir)
-
-	srv := &server{
-		lb:   lb,
-		logf: logf,
-	}
-	sc, err := srv.newConn()
-	if err != nil {
-		t.Fatal(err)
-	}
-	// Remove the auth checks for the test
-	sc.insecureSkipTailscaleAuth = true
-
-	u, err := user.Current()
-	if err != nil {
-		t.Fatal(err)
-	}
-	um, err := userLookup(u.Username)
-	if err != nil {
-		t.Fatal(err)
-	}
-	sc.localUser = um
-	sc.info = &sshConnInfo{
-		sshUser: "test",
-		src:     netip.MustParseAddrPort("1.2.3.4:32342"),
-		dst:     netip.MustParseAddrPort("1.2.3.5:22"),
-		node:    (&tailcfg.Node{}).View(),
-		uprof:   tailcfg.UserProfile{},
-	}
-	sc.action0 = &tailcfg.SSHAction{Accept: true}
-	sc.finalAction = sc.action0
-	sc.authCompleted.Store(true)
-
-	sc.Handler = func(s gliderssh.Session) {
-		sc.newSSHSession(s).run()
-	}
-
-	ln, err := net.Listen("tcp4", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer ln.Close()
-	port := ln.Addr().(*net.TCPAddr).Port
-
-	go func() {
-		for {
-			c, err := ln.Accept()
-			if err != nil {
-				if !errors.Is(err, net.ErrClosed) {
-					t.Errorf("Accept: %v", err)
-				}
-				return
-			}
-			go sc.HandleConn(c)
-		}
-	}()
-
-	execSSH := func(args ...string) *exec.Cmd {
-		cmd := exec.Command("ssh",
-			"-F",
-			"none",
-			"-v",
-			"-p", fmt.Sprint(port),
-			"-o", "StrictHostKeyChecking=no",
-			"user@127.0.0.1")
-		cmd.Args = append(cmd.Args, args...)
-		return cmd
-	}
+	h := newTestSSHHarness(t)
+	u, execSSH := h.user, h.execSSH
 
 	t.Run("env", func(t *testing.T) {
 		if cibuild.On() {

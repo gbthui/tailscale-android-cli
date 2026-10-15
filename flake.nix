@@ -56,7 +56,7 @@
           system = system;
           overlays = [
             (final: prev: {
-              go_1_26 = prev.go_1_26.overrideAttrs (old: {
+              go_1_27 = prev.go_1_27.overrideAttrs (old: {
                 version = goVersion;
                 src = prev.fetchFromGitHub {
                   owner = "tailscale";
@@ -100,7 +100,7 @@
     # you're an end user you should be prepared for this flake to not
     # build periodically.
     packages = eachSystem (pkgs: rec {
-      default = pkgs.buildGo126Module {
+      default = pkgs.buildGo127Module {
         name = "tailscale";
         pname = "tailscale";
         src = ./.;
@@ -153,15 +153,24 @@
           gotools
           graphviz
           perl
-          go_1_26
+          go_1_27
           yarn
 
           # qemu and e2fsprogs are needed for natlab
           qemu
           e2fsprogs
+
+          # mtools (mcopy) and dtc are needed by the `tsapp-qemu-pi`
+          # Makefile target that boots the Tailscale appliance under qemu.
+          mtools
+          dtc
+
+          # awscli2 is used by gokrazy/build.go to import and register the
+          # Tailscale appliance AMI.
+          awscli2.out
         ];
       };
     });
   };
 }
-# nix-direnv cache busting line: sha256-Sd2iLJ7eDfDYdIRuW4xuiKgzhQWJWGAnz97FJWrVRlE=
+# nix-direnv cache busting line: sha256-f9abuyk1qvVr6MPpfmHay6p/U/+8flm1SBmHGjZa1aU=
