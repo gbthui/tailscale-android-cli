@@ -68,11 +68,9 @@ type peerAPIServer struct {
 func (s *peerAPIServer) skipKernelListener() bool {
 	switch runtime.GOOS {
 	case "android":
-		// Android for whatever reason often has problems creating the
-		// peerapi listener (Issues 4449, 4293). Since netstack
-		// intercepts the connections anyway, the kernel listener isn't
-		// needed.
-		return true
+		// This Android CLI fork needs a real peerapi kernel listener when available.
+		// Keep netstack fallback for environments where Listen cannot bind.
+		return false
 	case "freebsd":
 		// FreeBSD is a weak-host stack like Linux: a kernel listener on
 		// the node's Tailscale IP would answer TCP handshakes from
