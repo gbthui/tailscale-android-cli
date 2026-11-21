@@ -13,6 +13,7 @@ import (
 	"os"
 	"path"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"sync"
 	"unicode/utf8"
@@ -29,8 +30,12 @@ func init() {
 		if dir == "" {
 			return nil, errors.New("rootDir cannot be empty")
 		}
-		if err := os.MkdirAll(dir, 0o700); err != nil {
-			return nil, fmt.Errorf("mkdir %q: %w", dir, err)
+		// On Android, tailscaled may initialize before first screen unlock (FBE),
+		// when /sdcard is not yet mounted/decrypted. Defer MkdirAll to OpenWriter/Rename.
+		if runtime.GOOS != "android" {
+			if err := os.MkdirAll(dir, 0o700); err != nil {
+				return nil, fmt.Errorf("mkdir %q: %w", dir, err)
+			}
 		}
 		return fsFileOps{rootDir: dir}, nil
 	}

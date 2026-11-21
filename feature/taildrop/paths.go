@@ -27,10 +27,9 @@ func (e *Extension) SetFileOps(fileOps FileOps) {
 
 func (e *Extension) setPlatformDefaultDirectFileRoot() {
 	if runtime.GOOS == "android" {
-		dir := "/sdcard/Download/Taildrop"
-		if err := os.MkdirAll(dir, 0o700); err == nil {
-			e.directFileRoot = dir
-		}
+		// Set unconditionally: tailscaled starts before Android FBE unlocks
+		// /sdcard on boot, and fsFileOps creates the directory lazily on write.
+		e.directFileRoot = "/sdcard/Download/Taildrop"
 		return
 	}
 
