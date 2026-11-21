@@ -4,10 +4,14 @@
 package taildrop
 
 import (
+	"context"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
+	"time"
 
 	"tailscale.com/version/distro"
 )
@@ -142,4 +146,28 @@ func findUnraidTaildropDir(name string) (string, error) {
 		return dir, nil // return the symlink
 	}
 	return "", fmt.Errorf("shared folder %q not found", name)
+}
+
+// notifyAndroidFileReceived notifies TailControl via an explicit background
+// broadcast when a Taildrop file finishes landing in DirectFileMode on Android.
+func notifyAndroidFileReceived(finalPath string, size int64) {
+	if runtime.GOOS != "android" || finalPath == "" {
+		return
+	}
+	name := filepath.Base(finalPath)
+	go func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		_ = exec.CommandContext(
+			ctx,
+			"/system/bin/am", "broadcast",
+			"--user", "0",
+			"-f", "0x01000020", // FLAG_RECEIVER_INCLUDE_BACKGROUND | FLAG_INCLUDE_STOPPED_PACKAGES
+			"-n", "top.cenmin.tailcontrol/.receiver.TaildropReceiver",
+			"-a", "top.cenmin.tailcontrol.ACTION_TAILDROP_RECEIVED",
+			"--es", "file_name", name,
+			"--es", "file_path", finalPath,
+			"--el", "file_size", strconv.FormatInt(size, 10),
+		).Run()
+	}()
 }

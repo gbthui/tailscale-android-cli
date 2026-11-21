@@ -158,6 +158,7 @@ func (m *manager) PutFile(id clientID, baseName string, r io.Reader, offset, len
 		return 0, m.redactAndLogError("Rename", err)
 	}
 	inFile.finalPath = finalPath
+	notifyAndroidFileReceived(finalPath, fileLength)
 
 	m.totalReceived.Add(1)
 	m.opts.SendFileNotify()
